@@ -3,6 +3,7 @@
 import math
 import torch
 import torch.nn as nn
+import numpy as np
 
 #? nn.Module needs to implement an forward() method.
 class LearnedPositionalEncodings(nn.Module) : 
@@ -23,14 +24,14 @@ class SinusodialPositionalEmbeddings(nn.Module) :
         self.max_len = max_len
         self.d_model = d_model
         
-        pe = torch.zeros(max_len, d_model) # placeholders for the positional embeddings
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1) # For broadcasting
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000) / d_model))
+        self.pe = np.zeros((max_len, d_model), dtype=np.float32)
+        position = np.arange(0, max_len, dtype=np.float32).reshape(-1, 1)
+        div_term = np.exp(np.arange(0, d_model, 2, dtype=np.float32) * (-math.log(10000) / d_model))
         
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        self.pe[:, 0::2] = np.sin(position * div_term)
+        self.pe[:, 1::2] = np.cos(position * div_term)
         
-        self.register_buffer("pe", pe)
+        self.register_buffer("pe", torch.from_numpy(self.pe))
         
     def forward(self, input : torch.Tensor) : 
         B, length, dimensions = input.shape

@@ -6,7 +6,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 import pytest
-from src.basics.multiheadAttention import MultiHeadAttention
+from src.components.multiheadAttention import MultiHeadAttention
 
 
 # ===== Shape tests =====
