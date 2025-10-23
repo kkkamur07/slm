@@ -27,7 +27,7 @@ class ByteDataset(DataLoader) :
         # This is the full paradigm of self supervised learning. 
         if self.val == True : 
             x = self.val[idx : idx + self.block_size]
-            y = self.val[idx + 1 : idx + self.block_size + 1]
+            y = self.val[idx + 1 : idx + self.block_size + 1] # Validation from the next index.
         else : 
             x = self.train_data[idx : idx + self.block_size]
             y = self.train_data[idx + 1 : idx + self.block_size + 1]
