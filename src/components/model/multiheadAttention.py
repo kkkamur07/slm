@@ -22,6 +22,7 @@ class CausalSelfAttention(nn.Module) :
             
         self.d_k = d_model // heads
         
+        self.dropout_p = dropout
         self.dropout = nn.Dropout(dropout)
         self.trace_shapes = trace_shapes
         
@@ -55,7 +56,7 @@ class CausalSelfAttention(nn.Module) :
             k,
             v, 
             attn_mask= None, 
-            dropout_p= self.dropout if self.training else 0.0, 
+            dropout_p= self.dropout_p if self.training else 0.0, 
             is_causal= True
         )
         

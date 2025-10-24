@@ -1,0 +1,33 @@
+# Data configuration
+data:
+  path: null  # Set via CLI: python train.py data.path=/path/to/data.txt
+  seq_len: 256
+  split: 0.9
+
+# Model configuration
+model:
+  n_layer: 2
+  heads: 2
+  d_model: 128
+  dropout: 0.0
+
+# Training configuration
+training:
+  lr: 3e-4
+  weight_decay: 0.1
+  amp: false
+  output_dir: runs/gpt
+  steps: 400
+  grad_clip: 1.0
+  compile: true
+  eval_intervals: 100
+  batch_size: 32
+  eval_iters: 50
+
+# Sampling configuration
+sampling:
+  sample_every: 100
+  sample_tokens: 256
+  temperature: 1.0
+  top_k: 50
+  top_p: null

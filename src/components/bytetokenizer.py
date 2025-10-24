@@ -19,7 +19,7 @@ class ByteTokenizer :
     def decode(self, ids : np.ndarray) -> str:
         if  isinstance(ids, torch.Tensor) : 
             ids = ids.cpu().numpy() #! is this efficient ? 
-        return bytes(ids).decode(self.encoding) # LIST TO BYTES TO STRING
+        return bytes(ids).decode(self.encoding, errors="replace") # LIST TO BYTES TO STRING
     
     def __len__(self) -> int : 
         return self.vocabSize

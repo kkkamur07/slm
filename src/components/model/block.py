@@ -8,6 +8,7 @@ class Block(nn.Module) :
         super().__init__()
         self.d_model = d_model
         self.heads = heads
+        self.dropout_p = dropout
         self.dropout = dropout
         self.d_v = d_v
         

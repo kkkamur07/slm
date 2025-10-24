@@ -5,22 +5,26 @@ from ..utils import top_k_top_p_filtering
 import torch.nn.functional as F
 
 class GPT(nn.Module) : 
-    def __init__(self, vocab_size, block_size, n_layer, heads, d_model, dropout ) : 
+    def __init__(self, vocab_size, seq_len, n_layer, heads, d_model, dropout ) : 
         super().__init__()
-        self.block_size = block_size # Maximum number of tokens per sequence
+        self.seq_len = seq_len # Maximum number of tokens per sequence
         self.vocab_size = vocab_size
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout
+        self.dropout = nn.Dropout(self.dropout_p)
         self.d_model = d_model
         self.n_layer = n_layer
         self.heads = heads
         
         self.tok_emb = nn.Embedding(self.vocab_size, self.d_model)
-        self.pos_emb = nn.Embedding(self.block_size, self.d_model) 
+        self.pos_emb = nn.Embedding(self.seq_len, self.d_model) 
         
         self.blocks = nn.ModuleList([
-            Block(d_model=self.d_model, 
-                  heads=self.heads, 
-                  dropout=self.dropout) 
+            Block(
+                d_model=self.d_model, 
+                heads=self.heads, 
+                dropout=self.dropout_p,
+                d_v=None,
+                ) 
             for _ in range(self.n_layer)])
         
         self.ln_f = nn.LayerNorm(d_model)
@@ -38,15 +42,15 @@ class GPT(nn.Module) :
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
             
     # Taking in input and gives you output
-    def forward(self, idx : torch.Tensor, targets : torch.Tensor | None) : 
+    def forward(self, idx : torch.Tensor, targets : torch.Tensor | None = None) : 
         batch, tokens = idx.shape
-        assert tokens <= self.block_size 
+        assert tokens <= self.seq_len 
         pos = torch.arange(0,tokens, device=idx.device).unsqueeze(0)
         x = self.tok_emb(idx) + self.pos_emb(pos) 
         x = self.dropout(x)
         
-        for blocks in self.blocks : 
-            x = blocks(x)
+        for block in self.blocks : 
+            x = block(x)
             
         x = self.ln_f(x)
         logits = self.head(x)
@@ -64,7 +68,7 @@ class GPT(nn.Module) :
             idx = torch.full((idx.size(0), 1),10, dtype=torch.long, device=idx.device)
         
         for _ in range(max_new_tokens) : 
-            idx_cond = idx[:, -self.block_size:] # We only need generation till block_size
+            idx_cond = idx[:, -self.seq_len:] # We only need generation till sequence length
             logits, _ = self(idx_cond) # Calls the forward method. 
             logits = logits[:, -1, :] / max(temperature, 1e-6) # Temperature is never zero
             logits = top_k_top_p_filtering(logits=logits, top_k=top_k, top_p=top_p)

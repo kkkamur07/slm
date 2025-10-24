@@ -1,37 +1,37 @@
 from __future__ import annotations
 from pathlib import Path
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 import torch
 import numpy as np
 
-class ByteDataset(DataLoader) : 
-    def __init__(self, path : str, block_size : int = 256, split : float = 0.9, val : bool = False): 
+class ByteDataset(Dataset) : 
+    def __init__(self, path : str, seq_len : int = 256, split : float = 0.9, train : bool = False): 
         super().__init__()
-        self.block_size = block_size
+        self.seq_len = seq_len
         self.path = path
         self.split = split
-        self.val = val
+        self.train = train
         
         # For efficiency reasons using `numpy`
         data = np.frombuffer(Path(self.path).read_bytes(), dtype=np.uint8)
-        self.data = torch.from_numpy(data).long()
-        self.n = int(len(data) * self.split)
+        data = data.copy()
+        data = torch.from_numpy(data).long()
         
-        self.train_data = self.data[:self.n]
-        self.val = self.data[self.n:]
+        n = int(len(data) * self.split)
+        self.data = data[:n] if train else data[n:]
         
     def __len__(self) -> int : 
-        return len(self.data)
+        return max(0, len(self.data) - self.seq_len - 1)
     
     def __getitem__(self, idx : int) : 
         # This is the full paradigm of self supervised learning. 
-        if self.val == True : 
-            x = self.val[idx : idx + self.block_size]
-            y = self.val[idx + 1 : idx + self.block_size + 1] # Validation from the next index.
-        else : 
-            x = self.train_data[idx : idx + self.block_size]
-            y = self.train_data[idx + 1 : idx + self.block_size + 1]
-            
-        return x, y
+        input = self.data[idx : idx + self.seq_len]
+        target = self.data[idx + 1 : idx + self.seq_len + 1]
+        
+         # Safety check: ensure we got the right size
+        assert len(input) == self.seq_len, f"Input length {len(input)} != block_size {self.block_size}"
+        assert len(target) == self.seq_len, f"Target length {len(target)} != block_size {self.block_size}"
+        
+        return input, target
     
     
