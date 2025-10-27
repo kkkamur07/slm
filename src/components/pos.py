@@ -15,7 +15,7 @@ class LearnedPositionalEncodings(nn.Module) :
     def forward(self, input : torch.Tensor) : 
         B, length, dimensions = input.shape # Batch, Length, Dimensions
         position = torch.arange(length, device=input.device)
-        pos_emb = self.emb(position) # Length, Dimensions
+        pos_emb = self.emb(position) # Length, d_model 
         return input + pos_emb.unsqueeze(0) # Adding a new dimension to the first position. 
     
 class SinusodialPositionalEmbeddings(nn.Module) : 
@@ -37,4 +37,6 @@ class SinusodialPositionalEmbeddings(nn.Module) :
         B, length, dimensions = input.shape
         return input + self.pe[:length].unsqueeze(0) # only required positional embeddings till length. 
     
-    
+class ROPE : 
+    def __init(self, input : torch.Tensor) -> torch.Tensor : 
+        

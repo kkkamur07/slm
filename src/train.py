@@ -10,8 +10,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 
-from src.components.byteDataset import ByteDataset
-from src.components.bytetokenizer import ByteTokenizer
+from src.components.dataset import ByteDataset
+from src.components.tokenizer import ByteTokenizer
 from src.components.model.gpt import GPT
 
 def estimate_loss(
