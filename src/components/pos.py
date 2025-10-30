@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import Optional
 
 #? nn.Module needs to implement an forward() method.
 class LearnedPositionalEncodings(nn.Module) : 
@@ -37,6 +38,61 @@ class SinusodialPositionalEmbeddings(nn.Module) :
         B, length, dimensions = input.shape
         return input + self.pe[:length].unsqueeze(0) # only required positional embeddings till length. 
     
-class ROPE : 
-    def __init(self, input : torch.Tensor) -> torch.Tensor : 
+  
+class ROPE(nn.Module) : 
+    def __init__(self, head_dim : int, max_seq_len : int, base : float = 10000, device: Optional[torch.device] = None) : 
+        super().__init__()
+        assert head_dim % 2 == 0 # why only even head dim ? 
+        self.head_dim = head_dim
+        self.max_seq_len = max_seq_len
+        self.base = base
+
+        self._build_cache(max_seq_len, device)
         
+    def _build_cache(self, max_len : int, device : Optional[torch.device] = None) : 
+       self.max_seq_len = max_len
+       
+       # Compute the inverse frequencies
+       inv_freq = 1.0 / (
+           self.base ** (torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim)
+           )
+       
+       # Positions
+       positions = torch.arange(max_len,device=device,dtype = torch.float32)
+       
+       # Outer product
+       freqs = torch.outer(positions, inv_freq)
+       
+       self.register_buffer("cos_cache", freqs.cos(), persistent=False)
+       self.register_buffer("sin_cached", freqs.sin(), persistent=False)
+       
+    def forward(self, x : torch.Tensor, seq_len : Optional[int] = None) -> torch.Tensor : 
+        if seq_len is None : 
+            seq_len = x.size(2) # 3 elements
+            
+        if seq_len > self.max_seq_len : 
+            self._build_cache(max(seq_len, 2 * self.max_seq_len))
+            
+        cos = self.cos_cached[:seq_len]
+        sin = self.sin_cached[:seq_len]
+        
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+        
+        return self._apply_rotation(x, cos, sin)
+    
+    def _apply_rotation(self, x : torch.Tensor, cos : torch.Tensor, sin : torch.Tensor) : 
+        x_even = x[..., 0::2]
+        x_odd = x[..., 1::2]
+        
+        x_even_rot = x_even * cos - x_odd * sin
+        x_odd_rot = x_even * sin + x_odd * cos
+        
+        x_rotated = torch.empty_like(x)
+        x_rotated[...,0::2] = x_even_rot
+        x_rotated[...,1::2] = x_odd_rot
+        
+        return x_rotated
+    
+    def extra_repr(self):
+        return f"head_dim={self.head_dim}, max_seq_len={self.max_seq_len}, base={self.base}"
