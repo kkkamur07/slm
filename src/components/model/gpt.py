@@ -1,6 +1,6 @@
 import torch 
 import torch.nn as nn
-from .block import Block
+from .block import TransformerBlock
 from ..utils import top_k_top_p_filtering
 import torch.nn.functional as F
 

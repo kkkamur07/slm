@@ -6,12 +6,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 import pytest
-from src.components.model.attention import MultiHeadAttention
+from src.components.model.attention import CausalSelfAttention
 
 
 # ===== Shape tests =====
 def test_output_shape_default():
-    m = MultiHeadAttention(heads=4, d_model=32, d_v=8, dropout=0.0)
+    m = CausalSelfAttention(heads=4, d_model=32, d_v=8, dropout=0.0)
     x = torch.randn(2, 10, 32)
     out = m(x)
     assert isinstance(out, torch.Tensor)

@@ -1,6 +1,4 @@
 """1.2 This module implements the multiHeaded attention & group query attention"""
-
-import math
 import torch 
 from torch import nn
 import torch.nn.functional as F
