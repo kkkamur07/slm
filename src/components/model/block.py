@@ -1,6 +1,6 @@
 import torch 
 import torch.nn as nn
-from .multiheadAttention import CausalSelfAttention
+from .attention import CausalSelfAttention
 from .ffn import FeedForwardNetwork
 
 class Block(nn.Module) : 

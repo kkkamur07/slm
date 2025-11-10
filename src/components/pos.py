@@ -63,18 +63,20 @@ class ROPE(nn.Module) :
        # Outer product
        freqs = torch.outer(positions, inv_freq)
        
-       self.register_buffer("cos_cache", freqs.cos(), persistent=False)
+       self.register_buffer("cos_cached", freqs.cos(), persistent=False)
        self.register_buffer("sin_cached", freqs.sin(), persistent=False)
        
-    def forward(self, x : torch.Tensor, seq_len : Optional[int] = None) -> torch.Tensor : 
+    def forward(self, x : torch.Tensor, seq_len : Optional[int] = None, start_pos : int = 0) -> torch.Tensor : 
         if seq_len is None : 
             seq_len = x.size(2) # 3 elements
             
-        if seq_len > self.max_seq_len : 
-            self._build_cache(max(seq_len, 2 * self.max_seq_len))
+        end_pos = start_pos + seq_len
             
-        cos = self.cos_cached[:seq_len]
-        sin = self.sin_cached[:seq_len]
+        if end_pos > self.max_seq_len : 
+            self._build_cache(max(end_pos, 2 * self.max_seq_len), device=x.device)
+            
+        cos = self.cos_cached[start_pos:end_pos]
+        sin = self.sin_cached[start_pos:end_pos]
         
         cos = cos.unsqueeze(0).unsqueeze(0)
         sin = sin.unsqueeze(0).unsqueeze(0)
