@@ -32,6 +32,9 @@ class BPETokenizer :
     """This is essentially a huggingface tokenizer wrapper -> Fast implementation in RUST"""
     
     def __init__(self, vocab_size : int = 32000, special_tokens : list[str] = None) : 
+        if ByteLevelBPETokenizer is None : 
+            raise ImportError("Please `pip install tokenizers` for BPETokenizers")
+        
         self.vocab_size = vocab_size
         self.special_tokens = special_tokens or ["<s>", "</s>", "<pad>", "<unk>", "<mask>"]
         self._tok = None

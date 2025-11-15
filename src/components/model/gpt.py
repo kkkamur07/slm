@@ -2,7 +2,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from .block import TransformerBlock
-from tokenizer import ByteTokenizer
+from src.components.data.tokenizer import ByteTokenizer
 import torch.nn.functional as F
 from einops import rearrange
 from utils import top_k_top_p_filtering

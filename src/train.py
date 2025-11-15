@@ -11,7 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 
 
 from src.components.dataset import ByteDataset
-from src.components.tokenizer import ByteTokenizer
+from src.components.data.tokenizer import ByteTokenizer
 from src.components.model.gpt import GPT
 
 def estimate_loss(
