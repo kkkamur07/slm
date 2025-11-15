@@ -9,3 +9,7 @@ wheels/
 # Virtual environments
 .venv
 outputs/
+.ruff_cache/
+.pytest_cache/
+data/
+runs/
