@@ -14,7 +14,7 @@ class TransformerBlock(nn.Module) :
         dropout : float = 0.0,
         use_rmsnorm : bool = True,
         rope : bool = True,
-        seq_len : int = 4096,
+        max_seq_length : int = 4096,
         sliding_window : int | None = None,
         attention_sink : int = 0
         ) : 
@@ -28,7 +28,7 @@ class TransformerBlock(nn.Module) :
             dropout=dropout,
             rope=rope,
             sliding_window=sliding_window,
-            max_seq_length=seq_len,
+            max_seq_length=max_seq_length,
             trace_shapes=False,
             attention_sink=attention_sink
         )

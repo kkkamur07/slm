@@ -1,81 +1,151 @@
-import torch 
+from __future__ import annotations
+import torch
 import torch.nn as nn
 from .block import TransformerBlock
-from ..utils import top_k_top_p_filtering
+from tokenizer import ByteTokenizer
 import torch.nn.functional as F
+from einops import rearrange
+from utils import top_k_top_p_filtering
 
-class GPT(nn.Module) : 
-    def __init__(self, vocab_size, seq_len, n_layer, heads, d_model, dropout ) : 
+class GPTModern(nn.Module): 
+                 
+    def __init__(
+        self, 
+        vocab_size: int = 256,
+        seq_length: int = 256,
+        n_layer: int=4, 
+        n_head: int=4,
+        d_model: int=256, 
+        dropout: float=0.0,
+        use_rmsnorm: bool = True,
+        # use_swiglu: bool = True, BY DEFAULT THIS IS TRUE. 
+        rope: bool = True,
+        max_pos: int = 4096,
+        sliding_window: int | None = None,
+        attention_sink: int = 0,
+        n_kv_head: int | None = None
+        ):
         super().__init__()
-        self.seq_len = seq_len # Maximum number of tokens per sequence
-        self.vocab_size = vocab_size
-        self.dropout_p = dropout
-        self.dropout = nn.Dropout(self.dropout_p)
-        self.d_model = d_model
-        self.n_layer = n_layer
-        self.heads = heads
-        
-        self.tok_emb = nn.Embedding(self.vocab_size, self.d_model)
-        self.pos_emb = nn.Embedding(self.seq_len, self.d_model) 
+        self.seq_length = seq_length 
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+        self.dropout = nn.Dropout(dropout)
         
         self.blocks = nn.ModuleList([
-            Block(
-                d_model=self.d_model, 
-                heads=self.heads, 
-                dropout=self.dropout_p,
-                d_v=None,
-                ) 
-            for _ in range(self.n_layer)])
+            TransformerBlock(
+                d_model=d_model,
+                n_head=n_head,
+                n_kv_head=n_kv_head,
+                dropout=self.dropout.p,
+                use_rmsnorm=use_rmsnorm,
+                rope=rope,
+                sliding_window=sliding_window,
+                attention_sink=attention_sink,
+                max_seq_length=max_pos
+            ) for _ in range(n_layer)
+        ])
+        self.ln_f = nn.Identity() if use_rmsnorm else nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
         
-        self.ln_f = nn.LayerNorm(d_model)
-        self.head = nn.Linear(d_model, vocab_size, bias=False) # INPUT : d_model OUTPUT : vocab_size
         
-        self.apply(self._init_weights)
-    
-    # HE initialization
-    def _init_weights(self,m) : 
-        if isinstance(m, nn.Linear) : 
-            nn.init.normal_(m.weight, mean=0.0, std=0.02)
-            if m.bias is not None : 
-                nn.init.zeros_(m.bias)
-        elif isinstance(m,nn.Embedding):
-            nn.init.normal_(m.weight, mean=0.0, std=0.02)
-            
-    # Taking in input and gives you output
-    def forward(self, idx : torch.Tensor, targets : torch.Tensor | None = None) : 
-        batch, tokens = idx.shape
-        assert tokens <= self.seq_len 
-        pos = torch.arange(0,tokens, device=idx.device).unsqueeze(0)
-        x = self.tok_emb(idx) + self.pos_emb(pos) 
+        
+    def forward(self, idx : torch.Tensor, targets : torch.Tensor | None = None, kv_cache_list = None, start_pos: int = 0) : 
+        B, T = idx.shape
+        assert T <= self.seq_length, "Input sequence length shouldn't exceed models maxiumum sequence length"
+        pos = torch.arange(0, T, device=idx.device).unsqueeze(0)
+        x = self.token_emb(idx) # No positional Embeddings here
         x = self.dropout(x)
         
-        for block in self.blocks : 
-            x = block(x)
+        
+        new_caches = []
+        
+        for i, block in enumerate(self.blocks) : 
+            cache = None if kv_cache_list is None else kv_cache_list[i]
+            x, cache = block(x, kv_cache = kv_cache_list, start_pos=start_pos)
+            new_caches.append(cache)
             
         x = self.ln_f(x)
         logits = self.head(x)
+        
         loss = None
-        
         if targets is not None : 
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, loss
+            logits_flat = rearrange(logits, 'b t v -> (b t) v')
+            targets_flat = rearrange(targets, "b t -> (b t)")
+            loss = F.cross_entropy(logits_flat, targets_flat)
+        return logits, loss, new_caches
     
-    @torch.no_grad() # Defining the property here
-    def generate(self, idx : torch.Tensor, max_new_tokens : int = 200, temperature : float = 1.0, top_k : int | None = 50, top_p : float | None = None)  :
+    @torch.no_grad()
+    def generate(
+        self,
+        prompt: torch.Tensor,
+        max_new_tokens: int = 200,      
+        temperature: float = 1.0,     
+        top_k: int = 50,
+        top_p: float | None = None,
+        eos_id: int = 1,
+        sliding_window: int | None = None, 
+        attention_sink: int = 0,
+    ):
         self.eval()
+        idx = prompt
+        kv = [None] * len(self.blocks)
         
-        if idx.size(1) == 0 : 
-            idx = torch.full((idx.size(0), 1),10, dtype=torch.long, device=idx.device)
         
         for _ in range(max_new_tokens) : 
-            idx_cond = idx[:, -self.seq_len:] # We only need generation till sequence length
-            logits, _ = self(idx_cond) # Calls the forward method. 
-            logits = logits[:, -1, :] / max(temperature, 1e-6) # Temperature is never zero
-            logits = top_k_top_p_filtering(logits=logits, top_k=top_k, top_p=top_p)
-            probs = torch.softmax(logits, dim = -1)
-            next_id = torch.multinomial(probs, num_samples=1) # Sampling, people are experimenting with this.
-            idx = torch.cat([idx, next_id], dim = 1) # Extending
+            idx_cont = idx[:, -self.seq_length:] if kv[0] is None else idx[:,-1:]
+            
+            start_pos = 0 if kv[0] is None else kv[0].k.size(2)
+            
+            logits, _, kvs = self(idx_cont, kv_cache_list = kv, start_pos=start_pos)
+            
+            next_logits = logits[:, -1, :] / max(temperature, 1e-6)
+            next_logits = top_k_top_p_filtering(logits=next, top_k=top_k, top_p=top_p)
+            
+            probs = torch.softmax(next_logits, dim=-1)
+            next_id = torch.argmax(probs, dim=-1, keepdim=True) if temperature == 0.0 else torch.multinomial(probs, 1)
+            idx = torch.cat([idx, next_id], dim=1)
+            
+            if eos_id is not None : 
+                if ( next_id == eos_id ).all() : 
+                    break
+                
         return idx
     
     
+    @torch.no_grad()
+    def generate_nocache(
+        self,
+        prompt : torch.Tensor,
+        max_new_tokens : int = 200,
+        temperature : float =  1.0,
+        top_k : int = 50,
+        top_p : int | None = None,
+        sliding_window : int | None = None,
+        eos_id : int = 1,
+        attention_sink : int = 0) : 
+
+        self.eval()
+        idx = prompt
         
+        for _ in range(max_new_tokens) : 
+            idx_cont = idx[:, -self.seq_length:]
+            start_pos = idx.size(1) - idx_cont.size(1) # Calculate the starting position of the RoPe Cache. 
+            logits, _, _ = self(idx_cont, kv_cache_list = None, start_pos=start_pos)
+            
+            next_logits = logits[:, -1, :] / max(temperature, 1e-6)
+            next_logits = top_k_top_p_filtering(logits=next, top_k=top_k, top_p=top_p)
+            probs = torch.softmax(next_logits, dim=-1)
+            topv , topk = torch.topk(probs, 10)
+            next_id = torch.argmax(probs, dim=-1, keepdim=True) if temperature == 0.0 else torch.multinomial(probs, 1)
+            idx = torch.cat([idx, next_id], dim=1)
+            
+            if (next_id == eos_id).all() : 
+                break
+            
+        return idx
+    
+            
+        
+        
+            
+            
+                   
