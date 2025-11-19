@@ -1,263 +1,208 @@
 from __future__ import annotations
-import os
-import time
+import argparse, time, signal
 from pathlib import Path
+import sys
 
 import torch
-from torch.utils.data import DataLoader
+import torch.nn as nn
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
+from src.components.model.gpt import GPTModern
+
+from src.data.tokenizer import BPETokenizer
+from src.data.dataset import make_loader
+from lr_scheduler import WarmupCosineLR
+from amp_accum import AmpGrad
+from checkpointing import (
+    load_checkpoint,
+    _log_hparams_tb,
+    _maybe_log_graph_tb,
+    _is_tb,
+    _log_model_stats,
+    _maybe_log_attention,
+    _log_samples_tb,
+    _log_runtime,
+    atomic_save_all,
+)
+from logger import init_logger
 
 
-from src.components.dataset import ByteDataset
-from src.components.data.tokenizer import ByteTokenizer
-from src.components.model.gpt import GPT
+def run_cfg_from_args(args, vocab_size: int) -> dict:
+    return dict(
+        vocab_size=vocab_size,
+        block_size=args.block_size,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
+        dropout=args.dropout,
+        use_rmsnorm=True,
+        use_swiglu=True,
+        rope=True,
+        max_pos=4096,
+        sliding_window=None,
+        attention_sink=0,
+    )
 
-def estimate_loss(
-    model : GPT,
-    train_loader : DataLoader,
-    val_loader : DataLoader,
-    eval_iters : int,
-    device : torch.device
-) -> dict[str, float] : 
-    
-    model.eval()
-    out = {}
-    
-    with torch.no_grad():
-        for split, loader in [("train", train_loader), ("val", val_loader)] : 
-            losses = []
-            loader_iter = iter(loader)
-            
-            for _ in range(min(eval_iters, len(loader))) : 
-                inputs, target = next(loader_iter)
-                inputs, target = inputs.to(device), target.to(device)
-                _, loss = model(inputs, target)
-                losses.append(loss.item())
-            
-            out[split] = sum(losses) / len(losses) if losses else 0.0
-            
-    model.train()
-    return out
-    
-    
-def train(
-    path,
-    seq_len,
-    split,
-    n_layer,
-    heads,
-    d_model,
-    dropout,
-    lr,
-    weight_decay,
-    amp,
-    output_dir,
-    train_steps,
-    grad_clip,
-    compile,
-    eval_intervals,
-    eval_iters,
-    sample_every,
-    sample_tokens,
-    temperature,
-    top_k, 
-    top_p,
-    batch_size
-    ) : 
-    
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    tokenizer = ByteTokenizer()
-    
-    train_dataset = ByteDataset(
-        path=path,
-        seq_len=seq_len,
-        split=split,
-        train=True
-    )
-    
-    val_dataset = ByteDataset(
-        path = path,
-        seq_len=seq_len,
-        split=split,
-        train=False
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0
-    )
-    
-    # Initialize the model
-    model = GPT(
-        vocab_size=tokenizer.vocabSize,
-        seq_len=seq_len, # This is essentially the batch size.
-        n_layer=n_layer,
-        heads = heads,
-        d_model = d_model,
-        dropout=dropout
-    ).to(device)
-    
-    if compile :
-        model = torch.compile(model)
-    
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr = lr,
-        betas = (0.9,0.95),
-        weight_decay=weight_decay   
-    )
-    
-    # Gradient Scaler
-    scaler = torch.amp.GradScaler(
-        enabled = (amp and device == "cuda")
-    )
-    
-    # Training loop
-    os.makedirs(output_dir, exist_ok=True)
-    
-    best_val_loss = float("inf")
-    train_iter = iter(train_loader)
-    t0 = time.time()
-    model.train()
-    
-    for step in range(1, train_steps + 1) : 
-        inputs, target = next(train_iter)
-        inputs, target = inputs.to(device), target.to(device)
-        
-        # Forward pass
-        with torch.amp.autocast(device_type=device, enabled=(amp and device == "cuda")) : 
-            _, loss = model(inputs, target)
-        
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        
-        if grad_clip >0 : 
-            scaler.unscale_(optimizer=optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        
-        scaler.step(optimizer=optimizer)
-        scaler.update()
-        
-        # Loggings
-        
-        if step % 50 == 0 : 
-            t1 = time.time()
-            print(f"Step {step} / {train_steps} : loss = {loss.item():.4f} | time per step = {(t1 - t0) / 50 :.4f} sec")
-            
-        if step % eval_intervals == 0 : 
-            losses = estimate_loss(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                eval_iters=eval_iters,
-                device=device
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--data', type=str, required=True)
+    p.add_argument('--out', type=str, default='runs/part4')
+
+    # tokenizer / model dims
+    p.add_argument('--bpe', action='store_true', help='train and use a BPE tokenizer (recommended)')
+    p.add_argument('--vocab_size', type=int, default=32000)
+    p.add_argument('--block_size', type=int, default=256)
+    p.add_argument('--n_layer', type=int, default=6)
+    p.add_argument('--n_head', type=int, default=8)
+    p.add_argument('--n_embd', type=int, default=512)
+    p.add_argument('--dropout', type=float, default=0.0)
+
+    # train
+    p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--epochs', type=int, default=1)
+    p.add_argument('--steps', type=int, default=300, help='max optimizer steps for this run')
+    p.add_argument('--lr', type=float, default=3e-4)
+    p.add_argument('--warmup_steps', type=int, default=20)
+    p.add_argument('--mixed_precision', action='store_true')
+    p.add_argument('--grad_accum_steps', type=int, default=4)
+
+    # misc
+    p.add_argument('--log', choices=['wandb', 'tensorboard', 'none'], default='tensorboard')
+    p.add_argument('--save_every', type=int, default=50, help='save checkpoint every N optimizer steps')
+    p.add_argument('--keep_last_k', type=int, default=2, help='keep last K step checkpoints (plus model_last.pt)')
+    args = p.parse_args()
+
+    # device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # output dir and (possible) checkpoint
+    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / "model_last.pt"
+    have_ckpt = ckpt_path.exists()
+
+    # ---- load checkpoint meta if present ----
+    ckpt = None
+    saved_tok_dir = None
+    if have_ckpt:
+        ckpt = torch.load(str(ckpt_path), map_location=device)
+        if "config" not in ckpt:
+            raise RuntimeError(
+                "Checkpoint is missing 'config'."
+                "Please re-save a checkpoint that includes the model config."
             )
-            
-            print(f"Step {step} / {train_steps} : Train Loss = {losses['train']:.4f} | Val Loss = {losses['val']:.4f}")
-            
-            # Save the model if the validation loss is the best we've seen so far.
-            if losses["val"] < best_val_loss : 
-                best_val_loss = losses["val"]
-                torch.save({
-                    "model" : model.state_dict(),
-                    "optimizer" : optimizer.state_dict(),
-                    "step" : step,
-                    "config" : {
-                        "seq_len" : seq_len,
-                        "n_layer" : n_layer,
-                        "heads" : heads,
-                        "d_model" : d_model,
-                        "dropout" : dropout
-                    }
-                }, f"{output_dir}/best_model.pth")
-                print("Saved Best Model")
-                
-        if sample_every > 0 and step % sample_every == 0 : 
-            start = torch.randint(
-                low = 0, 
-                high=len(train_dataset) - seq_len -1,
-                size=(1,)
-            ).to(device)
-            seed, _ = train_dataset[start]
-            seed = seed.unsqueeze(0).to(device)
-            
-            generated = model.generate(
-                idx= seed,
-                max_new_tokens = sample_tokens,
-                temperature = temperature,
-                top_k = top_k,
-                top_p = top_p 
-            )
-            
-            text = tokenizer.decode(generated[0].cpu())
-            print(f"\n{'='*50}\n{text}\n{'='*50}\n")
-            
-        model.train()
-        
-    torch.save({
-        "model" : model.state_dict(),
-        "optimizer" : optimizer.state_dict(),
-        "step" : step,
-        "config" : {
-            "seq_len" : seq_len,
-            "n_layer" : n_layer,
-            "heads" : heads,
-            "d_model" : d_model,
-            "dropout" : dropout
-        }
-    }, f"{output_dir}/final_model.pth")
-    print("Training Complete")
-    
+        tok_file = ckpt_path.with_name("tokenizer_dir.txt")
+        saved_tok_dir = tok_file.read_text().strip() if tok_file.exists() else None
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
-def main(cfg : DictConfig) :
-    print(OmegaConf.to_yaml(cfg))
-    train(
-        path=cfg.data.path,
-        seq_len=cfg.data.seq_len,
-        split=cfg.data.split,
-        
-        n_layer=cfg.model.n_layer,
-        heads=cfg.model.heads,
-        d_model=cfg.model.d_model,
-        dropout=cfg.model.dropout,
-        
-        lr=cfg.training.lr,
-        weight_decay=cfg.training.weight_decay,
-        amp=cfg.training.amp,
-        batch_size=cfg.training.batch_size,
-        output_dir=cfg.training.output_dir,
-        train_steps=cfg.training.steps,
-        grad_clip=cfg.training.grad_clip,
-        compile=cfg.training.compile,
-        eval_iters=cfg.training.eval_iters,
-        eval_intervals=cfg.training.eval_intervals,
-        
-        sample_every=cfg.sampling.sample_every,
-        sample_tokens=cfg.sampling.sample_tokens,
-        temperature=cfg.sampling.temperature,
-        top_k=cfg.sampling.top_k,
-        top_p=cfg.sampling.top_p
-    )
-    
-if __name__ == "__main__" :
+    # ---- tokenizer ----
+    tok = None
+    tok_dir = None
+    if have_ckpt:
+        if not saved_tok_dir:
+            raise RuntimeError(
+                "Checkpoint was found but tokenizer_dir.txt is missing. "
+                "Resume requires the original tokenizer."
+            )
+        tok = BPETokenizer(); tok.load(saved_tok_dir)
+        tok_dir = saved_tok_dir
+        vocab_size = tok.vocab_size
+        print(f"[resume] Loaded tokenizer from {tok_dir} (vocab={vocab_size})")
+    else:
+        if args.bpe:
+            tok = BPETokenizer(vocab_size=args.vocab_size)
+            tok.train(args.data)
+            tok_dir = str(out_dir / 'tokenizer'); Path(tok_dir).mkdir(parents=True, exist_ok=True)
+            tok.save(tok_dir)
+            vocab_size = tok.vocab_size
+            print(f"[init] Trained tokenizer to {tok_dir} (vocab={vocab_size})")
+        else:
+            tok = None
+            vocab_size = 256  # byte-level fallback (not recommended for Part 4)
+
+    # ---- dataset ----
+    train_loader = make_loader(args.data, tok, args.block_size, args.batch_size, shuffle=True)
+
+    # ---- build model config ----
+    if have_ckpt:
+        cfg_build = ckpt["config"]
+        if cfg_build.get("vocab_size") != vocab_size:
+            raise RuntimeError(
+                f"Tokenizer vocab ({vocab_size}) != checkpoint config vocab ({cfg_build.get('vocab_size')}). "
+                "This deterministic script forbids vocab changes on resume."
+            )
+    else:
+        cfg_build = run_cfg_from_args(args, vocab_size)
+
+    # ---- init model/opt/sched/amp ----
+    model = GPTModern(**cfg_build).to(device)
+    optim = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
+
+    total_steps = min(args.steps, args.epochs * len(train_loader))
+    warmup = min(args.warmup_steps, max(total_steps // 10, 1))
+    sched = WarmupCosineLR(optim, warmup_steps=warmup, total_steps=total_steps, base_lr=args.lr)
+
+    amp = AmpGrad(optim, accum=args.grad_accum_steps, amp=args.mixed_precision)
+
+    # ---- strict resume ----
+    step = 0
+    if have_ckpt:
+        step = load_checkpoint(model, str(ckpt_path), optimizer=optim, scheduler=sched, amp=amp, strict=True)
+        print(f"[resume] Loaded checkpoint at step {step}")
+
+    # ---- logging ----
+    logger = init_logger(args.log, out_dir=str(out_dir))
+    _log_hparams_tb(logger, args, total_steps)
+    if _is_tb(logger):
+        try:
+            ex_x, ex_y = next(iter(train_loader))
+            _maybe_log_graph_tb(logger, model, ex_x.to(device), ex_y.to(device))
+        except Exception:
+            pass
+
+    # ---- graceful save on SIGINT/SIGTERM ----
+    save_requested = {"flag": False}
+    def _on_term(sig, frame): save_requested["flag"] = True
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT,  _on_term)
+
+    # ---- train loop ----
+    model.train()
+    while step < args.steps:
+        for xb, yb in train_loader:
+            if step >= args.steps: break
+            if save_requested["flag"]:
+                atomic_save_all(model, optim, sched, amp, step, out_dir, tok_dir, args.keep_last_k, cfg_build)
+                print(f"[signal] Saved checkpoint at step {step} to {out_dir}. Exiting.")
+                return
+
+            it_t0 = time.time()
+            xb, yb = xb.to(device), yb.to(device)
+            with torch.cuda.amp.autocast(enabled=amp.amp):
+                logits, loss, _ = model(xb, yb)
+            amp.backward(loss)
+
+            if amp.should_step():
+                amp.step(); amp.zero_grad()
+                lr = sched.step()
+                step += 1
+
+                # periodic checkpoint
+                if step % args.save_every == 0:
+                    atomic_save_all(model, optim, sched, amp, step, out_dir, tok_dir, args.keep_last_k, cfg_build)
+                    if _is_tb(logger):
+                        logger.text("meta/checkpoint", f"Saved at step {step}", step)
+
+                # logging
+                if step % 50 == 0:
+                    logger.log(step=step, loss=float(loss.item()), lr=float(lr))
+                    _log_runtime(logger, step, it_t0, xb, device)
+                    _log_model_stats(logger, model, step, do_hists=False)
+                    _maybe_log_attention(logger, model, xb, step, every=100)
+                    _log_samples_tb(logger, model, tok, xb, device, step, max_new_tokens=64)
+
+    # ---- final save ----
+    atomic_save_all(model, optim, sched, amp, step, out_dir, tok_dir, args.keep_last_k, cfg_build)
+    print(f"Saved checkpoint to {out_dir}/model_last.pt")
+
+
+if __name__ == '__main__':
     main()
-
-            
-            
-            
-        
-        
-        
